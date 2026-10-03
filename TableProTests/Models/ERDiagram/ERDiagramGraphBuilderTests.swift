@@ -23,9 +23,16 @@ struct ERDiagramGraphBuilderTests {
         _ name: String = "fk",
         column: String,
         references table: String,
-        _ refColumn: String = "id"
+        _ refColumn: String = "id",
+        virtual: Bool = false
     ) -> ForeignKeyInfo {
-        ForeignKeyInfo(name: name, column: column, referencedTable: table, referencedColumn: refColumn)
+        ForeignKeyInfo(
+            name: name,
+            column: column,
+            referencedTable: table,
+            referencedColumn: refColumn,
+            isVirtual: virtual
+        )
     }
 
     private func uniqueIndex(_ name: String, columns: [String]) -> IndexInfo {
@@ -262,6 +269,107 @@ struct ERDiagramGraphBuilderTests {
         )
         #expect(!isJunction("orders", in: graph))
         #expect(graph.manyToManyEdges.isEmpty)
+    }
+
+    // MARK: - Virtual foreign keys
+
+    @Test("A virtual foreign key produces a virtual edge and a real one does not")
+    func virtualFlagReachesTheEdge() {
+        let graph = ERDiagramGraphBuilder.build(
+            allColumns: [
+                "users": [column("id", primaryKey: true)],
+                "orders": [
+                    column("id", primaryKey: true),
+                    column("user_id", nullable: false),
+                    column("payer_id", nullable: true)
+                ]
+            ],
+            allForeignKeys: ["orders": [
+                foreignKey("fk_user", column: "user_id", references: "users"),
+                foreignKey("virtual_payer_id_users", column: "payer_id", references: "users", virtual: true)
+            ]]
+        )
+        let real = graph.edges.first { $0.fkName == "fk_user" }
+        let virtual = graph.edges.first { $0.fkName == "virtual_payer_id_users" }
+        #expect(real?.isVirtual == false)
+        #expect(virtual?.isVirtual == true)
+    }
+
+    @Test("Two virtual foreign keys on one table both keep their edges")
+    func twoVirtualEdgesOnOneTableSurviveDeduplication() {
+        let graph = ERDiagramGraphBuilder.build(
+            allColumns: [
+                "users": [column("id", primaryKey: true)],
+                "genres": [column("id", primaryKey: true)],
+                "orders": [
+                    column("id", primaryKey: true),
+                    column("user_id", nullable: false),
+                    column("genre_id", nullable: false)
+                ]
+            ],
+            allForeignKeys: ["orders": [
+                foreignKey("virtual_user_id_users", column: "user_id", references: "users", virtual: true),
+                foreignKey("virtual_genre_id_genres", column: "genre_id", references: "genres", virtual: true)
+            ]]
+        )
+        let virtualEdges = graph.edges.filter { $0.fromTable == "orders" && $0.isVirtual }
+        #expect(virtualEdges.count == 2)
+        #expect(Set(virtualEdges.map(\.toTable)) == ["users", "genres"])
+    }
+
+    @Test("Virtual foreign keys mark a junction table and its many-to-many edge is virtual")
+    func virtualBranchMakesManyToManyEdgeVirtual() {
+        let graph = ERDiagramGraphBuilder.build(
+            allColumns: [
+                "users": [column("id", primaryKey: true)],
+                "roles": [column("id", primaryKey: true)],
+                "user_roles": [
+                    column("user_id", primaryKey: true),
+                    column("role_id", primaryKey: true)
+                ]
+            ],
+            allForeignKeys: ["user_roles": [
+                foreignKey("fk_user", column: "user_id", references: "users"),
+                foreignKey("virtual_role_id_roles", column: "role_id", references: "roles", virtual: true)
+            ]]
+        )
+        #expect(isJunction("user_roles", in: graph))
+        #expect(graph.manyToManyEdges.first?.isVirtual == true)
+    }
+
+    @Test("A junction table built from real foreign keys keeps a solid many-to-many edge")
+    func realBranchesKeepManyToManyEdgeSolid() {
+        let graph = ERDiagramGraphBuilder.build(
+            allColumns: [
+                "users": [column("id", primaryKey: true)],
+                "roles": [column("id", primaryKey: true)],
+                "user_roles": [
+                    column("user_id", primaryKey: true),
+                    column("role_id", primaryKey: true)
+                ]
+            ],
+            allForeignKeys: ["user_roles": [
+                foreignKey("fk_user", column: "user_id", references: "users"),
+                foreignKey("fk_role", column: "role_id", references: "roles")
+            ]]
+        )
+        #expect(graph.manyToManyEdges.first?.isVirtual == false)
+    }
+
+    @Test("A virtual foreign key marks its column as a foreign key column")
+    func virtualForeignKeyMarksTheColumn() {
+        let graph = ERDiagramGraphBuilder.build(
+            allColumns: [
+                "users": [column("id", primaryKey: true)],
+                "orders": [column("id", primaryKey: true), column("user_id", nullable: false)]
+            ],
+            allForeignKeys: ["orders": [
+                foreignKey("virtual_user_id_users", column: "user_id", references: "users", virtual: true)
+            ]]
+        )
+        let node = graph.nodes.first { $0.tableName == "orders" }
+        let userColumn = node?.columns.first { $0.name == "user_id" }
+        #expect(userColumn?.isForeignKey == true)
     }
 
     // MARK: - Projection

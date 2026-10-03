@@ -1,0 +1,207 @@
+name: Build Unsigned DMG
+
+# Manual-only: builds the app without Developer ID signing or notarization and packages it
+# into a plain DMG for personal use. Needs no repository secrets. The binaries carry only
+# the linker's ad-hoc signature, so Gatekeeper on another machine requires right-click Open
+# or `xattr -d com.apple.quarantine`.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-no-sign-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x86_64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Select Xcode
+        uses: ./.github/actions/setup-xcode
+
+      # Libs/*.a are not in git; they live on the upstream libs-v1 GitHub Release and the
+      # script's repo is hardcoded to TableProApp/TablePro, so this works from a fork too.
+      - name: Download static libraries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/download-libs.sh --force
+
+      - name: Prepare static libraries
+        run: scripts/ci/prepare-libs.sh ${{ matrix.arch }}
+
+      - name: Create OpenSSL shared dylibs
+        run: scripts/create-openssl-dylibs.sh ${{ matrix.arch }}
+
+      # The build reads Configs/Secrets.xcconfig through #include?; an empty analytics secret
+      # only disables analytics submission.
+      - name: Create Secrets.xcconfig
+        run: echo "ANALYTICS_HMAC_SECRET =" > Configs/Secrets.xcconfig
+
+      - name: Setup XcodeGen
+        uses: ./.github/actions/setup-xcodegen
+
+      - name: Generate Xcode project
+        run: scripts/generate-project.sh macos
+
+      - name: Cache Swift package checkouts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.spm-cache
+          key: ${{ runner.os }}-spm-${{ hashFiles('TablePro.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: ${{ runner.os }}-spm-
+
+      - name: Resolve Swift package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project TablePro.xcodeproj \
+            -scheme TablePro \
+            -clonedSourcePackagesDirPath ~/.spm-cache \
+            -skipPackagePluginValidation
+
+      - name: Build Release (unsigned)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project TablePro.xcodeproj \
+            -scheme TablePro \
+            -configuration Release \
+            -arch "${{ matrix.arch }}" \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            -skipPackagePluginValidation \
+            -clonedSourcePackagesDirPath ~/.spm-cache \
+            -derivedDataPath build/DerivedData \
+            build
+
+      # verify-build.sh checks architecture purity, that no Homebrew paths leaked into the
+      # binary, and that every plugin project.yml embeds is in the bundle. It reads the app at
+      # build/Release/TablePro-<arch>.app, the same layout build-release.sh produces.
+      - name: Stage app bundle
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          APP="build/DerivedData/Build/Products/Release/TablePro.app"
+          test -d "$APP"
+          mkdir -p build/Release
+          rm -rf "build/Release/TablePro-$ARCH.app"
+          cp -R "$APP" "build/Release/TablePro-$ARCH.app"
+
+      # Ad-hoc signing, inside out, the same order build-release.sh signs with Developer ID:
+      # one --deep over the whole app skips Sparkle's nested Updater.app and XPC services and
+      # loose helper executables, and verification then fails on exactly those.
+      - name: Ad-hoc sign app bundle
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          APP="build/Release/TablePro-$ARCH.app"
+          SPARKLE="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+          for nested in \
+            "$SPARKLE/Autoupdate" \
+            "$SPARKLE/Updater.app" \
+            "$SPARKLE"/XPCServices/*.xpc; do
+            if [ -e "$nested" ]; then
+              codesign --force --deep --sign - "$nested"
+            fi
+          done
+          for item in "$APP"/Contents/Frameworks/*; do
+            codesign --force --sign - "$item"
+          done
+          for plugin in "$APP"/Contents/PlugIns/*.tableplugin; do
+            binary="$plugin/Contents/MacOS/$(basename "$plugin" .tableplugin)"
+            if [ -f "$binary" ]; then
+              codesign --force --sign - "$binary"
+            fi
+            codesign --force --sign - "$plugin"
+          done
+          for helper in "$APP"/Contents/MacOS/*; do
+            if [ -f "$helper" ] && [ "$(basename "$helper")" != "TablePro" ]; then
+              codesign --force --sign - "$helper"
+            fi
+          done
+          codesign --force --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+
+      # scripts/ci/verify-build.sh is release-only: it greps the signature for an Authority=
+      # line (ad-hoc has none, and under set -e the miss kills the script), then requires a
+      # notarization ticket and Gatekeeper acceptance, which an unsigned build can never have.
+      # This inlines the checks that do apply: architecture purity, no Homebrew paths, every
+      # embedded plugin present with its binary, and the PluginKit framework.
+      - name: Verify build
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          APP="build/Release/TablePro-$ARCH.app"
+          BINARY="$APP/Contents/MacOS/TablePro"
+          test -x "$BINARY"
+          ARCH_INFO=$(lipo -info "$BINARY")
+          echo "$ARCH_INFO"
+          echo "$ARCH_INFO" | grep -q "$ARCH"
+          if [ "$ARCH" = "arm64" ]; then OPPOSITE="x86_64"; else OPPOSITE="arm64"; fi
+          if echo "$ARCH_INFO" | grep -q "$OPPOSITE"; then
+            echo "ERROR: binary contains $OPPOSITE but should be $ARCH only"
+            exit 1
+          fi
+          if otool -L "$BINARY" | grep -q '/opt/homebrew/\|/usr/local/opt/'; then
+            echo "ERROR: binary references Homebrew paths:"
+            otool -L "$BINARY" | grep '/opt/homebrew/\|/usr/local/opt/'
+            exit 1
+          fi
+          test -d "$APP/Contents/Frameworks/TableProPluginKit.framework"
+          MISSING=0
+          while IFS= read -r plugin; do
+            bundle="$APP/Contents/PlugIns/$plugin.tableplugin"
+            binary="$bundle/Contents/MacOS/$plugin"
+            if [ ! -d "$bundle" ] || [ ! -f "$binary" ]; then
+              echo "ERROR: missing plugin $plugin"
+              MISSING=1
+            fi
+          done < <(python3 -c '
+          import re, sys
+          text = open("project.yml").read()
+          names = re.findall(
+              r"-\s*target:\s*(\S+)[^\n]*\n(?:\s+\w+:[^\n]*\n)*?\s*copy:\s*\{\s*destination:\s*plugins\s*\}",
+              text,
+          )
+          if not names:
+              sys.exit("project.yml declares no plugins copied into the app bundle")
+          print("\n".join(names))
+          ')
+          [ "$MISSING" -eq 0 ]
+          echo "All checks passed"
+
+      - name: Package DMG
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/^MARKETING_VERSION[[:space:]]*=[[:space:]]*//p' Configs/Version.xcconfig | tr -d ' ')
+          test -n "$VERSION"
+          STAGE=$(mktemp -d)
+          cp -R "build/Release/TablePro-$ARCH.app" "$STAGE/TablePro.app"
+          ln -s /Applications "$STAGE/Applications"
+          mkdir -p build/Unsigned
+          hdiutil create \
+            -volname "TablePro $VERSION" \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "build/Unsigned/TablePro-$VERSION-$ARCH-unsigned.dmg"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: TablePro-unsigned-${{ matrix.arch }}
+          path: build/Unsigned/TablePro-*-unsigned.dmg
+          if-no-files-found: error

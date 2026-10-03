@@ -170,7 +170,33 @@ extension QueryExecutionCoordinator {
         if resolved.columnForeignKeys.isEmpty, !resolved.foreignKeysFetched, let tableName {
             resolved.columnForeignKeys = prefetchedForeignKeys(tabIndex: tabIndex, tableName: tableName) ?? [:]
         }
+
+        if let tableName {
+            resolved.columnForeignKeys = VirtualForeignKeyMerge.merged(
+                real: resolved.columnForeignKeys,
+                virtual: virtualForeignKeys(tabIndex: tabIndex, tableName: tableName)
+            )
+        }
         return resolved
+    }
+
+    private func virtualForeignKeys(tabIndex: Int, tableName: String) -> [VirtualForeignKey] {
+        guard tabIndex < parent.tabManager.tabs.count,
+              let scope = parent.scope(for: parent.tabManager.tabs[tabIndex])
+        else { return [] }
+        return VirtualForeignKeyStore.shared.virtualForeignKeys(
+            for: TableScope(
+                connectionId: scope.connectionId,
+                database: scope.database,
+                schema: scope.schema,
+                table: tableName
+            )
+        )
+    }
+
+    private func virtualForeignKeys(tabId: UUID, tableName: String) -> [VirtualForeignKey] {
+        guard let idx = parent.tabManager.tabs.firstIndex(where: { $0.id == tabId }) else { return [] }
+        return virtualForeignKeys(tabIndex: idx, tableName: tableName)
     }
 
     /// The keys a committed result is edited by. Keys the tab held for the same table carry over
@@ -551,19 +577,31 @@ extension QueryExecutionCoordinator {
         resultSetId: UUID?
     ) {
         let parsed = parseSchemaMetadata(schema)
+        let mergedForeignKeys = parsed.columnForeignKeys.map { real in
+            VirtualForeignKeyMerge.merged(
+                real: real,
+                virtual: virtualForeignKeys(tabId: tabId, tableName: tableName)
+            )
+        }
         guard resultStillActive(tabId, resultSetId) else {
             /// The result this was fetched for is still there, the user is just looking at another
             /// one. Dropping the metadata left it with no account of which columns the server owns,
             /// and nothing re-fetches on the way back, so the result stayed that way for good.
-            applyPhase2MetadataToInactiveResult(parsed: parsed, tabId: tabId, resultSetId: resultSetId)
+            applyPhase2MetadataToInactiveResult(
+                parsed: parsed,
+                columnForeignKeys: mergedForeignKeys,
+                tabId: tabId,
+                resultSetId: resultSetId
+            )
             helpersLogger.info("[fk] phase2 applied to an inactive result table=\(tableName, privacy: .private(mask: .hash))")
             return
         }
-        applyPhase2Metadata(parsed: parsed, tabId: tabId)
+        applyPhase2Metadata(parsed: parsed, columnForeignKeys: mergedForeignKeys, tabId: tabId)
     }
 
     private func applyPhase2MetadataToInactiveResult(
         parsed: ParsedSchemaMetadata,
+        columnForeignKeys: [String: ForeignKeyInfo]?,
         tabId: UUID,
         resultSetId: UUID?
     ) {
@@ -574,7 +612,7 @@ extension QueryExecutionCoordinator {
 
         resultSet.tableRows.updateDisplayMetadata(
             columnDefaults: parsed.columnDefaults,
-            columnForeignKeys: parsed.columnForeignKeys,
+            columnForeignKeys: columnForeignKeys,
             columnNullable: parsed.columnNullable,
             columnComments: parsed.columnComments,
             columnIdentity: parsed.columnIdentity,
@@ -613,13 +651,17 @@ extension QueryExecutionCoordinator {
         }
     }
 
-    private func applyPhase2Metadata(parsed: ParsedSchemaMetadata, tabId: UUID) {
+    private func applyPhase2Metadata(
+        parsed: ParsedSchemaMetadata,
+        columnForeignKeys: [String: ForeignKeyInfo]?,
+        tabId: UUID
+    ) {
         guard parent.tabManager.tabs.contains(where: { $0.id == tabId }) else { return }
 
         parent.mutateActiveTableRows(for: tabId) { rows in
             rows.updateDisplayMetadata(
                 columnDefaults: parsed.columnDefaults,
-                columnForeignKeys: parsed.columnForeignKeys,
+                columnForeignKeys: columnForeignKeys,
                 columnNullable: parsed.columnNullable,
                 columnComments: parsed.columnComments,
                 columnIdentity: parsed.columnIdentity,
@@ -884,6 +926,22 @@ internal struct ExactCountInput: Sendable {
     internal let sql: String?
     internal let filters: [TableFilter]
     internal let logicMode: FilterLogicMode
+}
+
+enum VirtualForeignKeyMerge {
+    /// Virtual keys only supplement columns with no real constraint, so a configured relationship
+    /// can never shadow one the catalog reports.
+    static func merged(
+        real: [String: ForeignKeyInfo],
+        virtual virtualKeys: [VirtualForeignKey]
+    ) -> [String: ForeignKeyInfo] {
+        guard !virtualKeys.isEmpty else { return real }
+        let supplements = Dictionary(
+            virtualKeys.map { ($0.column, $0.toForeignKeyInfo()) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return supplements.merging(real) { _, realKey in realKey }
+    }
 }
 
 enum RowCountPlan: Equatable {

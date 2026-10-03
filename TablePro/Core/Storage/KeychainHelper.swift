@@ -187,18 +187,19 @@ final class KeychainHelper: KeychainStoring {
         return query
     }
 
+    /// The data protection keychain needs an `application-identifier` (or a keychain-access-group)
+    /// entitlement to write at all, and an ad-hoc or unsigned build has neither, so every write
+    /// fails with `errSecMissingEntitlement` and connections report "using password: NO". Gate on
+    /// the entitlement being present, not on the build configuration, so an unsigned Release build
+    /// (the no-sign DMG workflow) falls back to the file-based keychain the same way DEBUG does.
     private static let canUseDataProtectionKeychain: Bool = {
-        #if DEBUG
         guard let task = SecTaskCreateFromSelf(nil),
               SecTaskCopyValueForEntitlement(task, "com.apple.application-identifier" as CFString, nil) != nil
         else {
-            logger.warning("No application-identifier entitlement; falling back to the file-based keychain (DEBUG build)")
+            logger.warning("No application-identifier entitlement; falling back to the file-based keychain")
             return false
         }
         return true
-        #else
-        return true
-        #endif
     }()
 
     private func accessibility(forSync synchronizable: Bool) -> CFString {

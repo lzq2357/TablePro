@@ -19,6 +19,7 @@ enum SQLCompletionKind: String, CaseIterable {
     case alias
     case `operator`
     case favorite   // Saved SQL favorite (keyword expansion)
+    case relation   // Join condition from a foreign key between joined tables
 
     /// SF Symbol for display
     var iconName: String {
@@ -32,6 +33,7 @@ enum SQLCompletionKind: String, CaseIterable {
         case .alias: return "a.circle.fill"
         case .operator: return "equal.circle.fill"
         case .favorite: return "star.circle.fill"
+        case .relation: return "link.circle.fill"
         }
     }
 
@@ -47,6 +49,7 @@ enum SQLCompletionKind: String, CaseIterable {
         case .alias: return .systemGray
         case .operator: return .systemIndigo
         case .favorite: return .systemYellow
+        case .relation: return .systemCyan
         }
     }
 
@@ -62,6 +65,7 @@ enum SQLCompletionKind: String, CaseIterable {
         case .alias: return 150
         case .schema: return 500
         case .operator: return 350
+        case .relation: return 30
         }
     }
 }
@@ -330,6 +334,20 @@ extension SQLCompletionItem {
             insertText: op,
             documentation: documentation,
             caseFolding: caseFolding
+        )
+    }
+
+    /// Create a join-condition item from a foreign key between two joined tables.
+    /// Real and virtual keys surface the same way; the source shows in the detail text.
+    static func joinCondition(_ condition: String, foreignKeyName: String, isVirtual: Bool) -> SQLCompletionItem {
+        SQLCompletionItem(
+            label: condition,
+            kind: .relation,
+            insertText: condition,
+            detail: isVirtual ? String(localized: "virtual foreign key") : foreignKeyName,
+            documentation: isVirtual
+                ? String(localized: "Join condition from a virtual foreign key")
+                : String(format: String(localized: "Join condition from foreign key %@"), foreignKeyName)
         )
     }
 

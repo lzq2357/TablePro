@@ -260,6 +260,8 @@ final class SQLCompletionProvider {
 
         case .on:
             items += await allowedValueItems(for: context)
+            // Foreign-key join conditions lead everything else in an ON clause
+            items += await joinConditionItems(for: context)
             // HP-3: ON clause — prioritize columns from joined tables
             items += await columnItems(for: context.tableReferences)
             for ref in context.tableReferences {
@@ -490,6 +492,36 @@ final class SQLCompletionProvider {
             .filter { $0.key.lowercased().hasPrefix(lowerPrefix) }
             .sorted { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }
             .map { SQLCompletionItem.favorite(keyword: $0.key, name: $0.value.name, query: $0.value.query) }
+    }
+
+    /// Complete join conditions for the ON clause, from the foreign keys between the JOIN's own
+    /// table and the other tables in scope. The keys come from the schema provider's snapshot, so
+    /// nothing here waits on the main actor or the database, and a pair of tables with no key
+    /// between them offers nothing.
+    private func joinConditionItems(for context: SQLContext) async -> [SQLCompletionItem] {
+        guard let schemaProvider, let target = context.joinTarget, !target.isDerived else { return [] }
+
+        let others = context.tableReferences.filter {
+            !$0.isDerived && $0.identifier.caseInsensitiveCompare(target.identifier) != .orderedSame
+        }
+        guard !others.isEmpty else { return [] }
+
+        let names = ([target] + others).map(\.tableName)
+        let foreignKeys = await schemaProvider.foreignKeys(forTablesNamed: names)
+        guard !foreignKeys.isEmpty else { return [] }
+
+        let suggestions = JoinConditionRecommender.suggestions(
+            target: target,
+            others: others,
+            foreignKeysByTable: foreignKeys
+        )
+        return suggestions.map {
+            SQLCompletionItem.joinCondition(
+                $0.conditionText,
+                foreignKeyName: $0.foreignKeyName,
+                isVirtual: $0.isVirtual
+            )
+        }
     }
 
     /// Values a compared column is restricted to, offered as quoted literals ahead of everything
@@ -816,6 +848,11 @@ final class SQLCompletionProvider {
                  .returning, .using, .window:
                 if item.kind == .column {
                     score -= 200
+                }
+                // A typed prefix must not let a joined table's columns outrank the
+                // full join condition they are part of.
+                if item.kind == .relation {
+                    score -= 400
                 }
             case .set, .insertColumns:
                 if item.kind == .column {

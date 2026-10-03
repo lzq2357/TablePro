@@ -51,6 +51,7 @@ Imports that remember each table's column mapping, and connect and query timeout
 - Folders for tables and views in the sidebar, synced between Macs over iCloud. (#3167, #3189, #3226)
 - Shift JIS, EUC-JP, GB 18030, Big5, EUC-KR and UTF-16 options for CSV and SQL import. (#3192)
 - Per-connection connect and query timeout controls in connection Options. (#2525, #3230)
+- Virtual foreign keys: grid jump and preview, dashed ER diagram lines, JOIN completion, and JSON export and import.
 
 ### Changed
 

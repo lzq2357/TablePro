@@ -26,6 +26,46 @@ struct ERDiagramViewModelLoadTests {
         return false
     }
 
+    @Test("A virtual foreign key joins the merged map as a virtual entry")
+    func virtualKeysMergeIn() {
+        let merged = ERDiagramViewModel.mergingVirtualForeignKeys(
+            ["orders": [VirtualForeignKey(column: "user_id", referencedTable: "users", referencedColumn: "id")]],
+            into: [:],
+            knownTables: ["orders", "users"]
+        )
+        let entry = merged["orders"]?.first
+        #expect(entry?.isVirtual == true)
+        #expect(entry?.column == "user_id")
+        #expect(entry?.referencedTable == "users")
+    }
+
+    @Test("A real foreign key on the same column keeps the virtual one out")
+    func realForeignKeyWins() {
+        let real = TestFixtures.makeForeignKeyInfo(name: "fk_user", column: "user_id")
+        let merged = ERDiagramViewModel.mergingVirtualForeignKeys(
+            ["orders": [
+                VirtualForeignKey(column: "user_id", referencedTable: "users", referencedColumn: "id"),
+                VirtualForeignKey(column: "genre_id", referencedTable: "genres", referencedColumn: "id")
+            ]],
+            into: ["orders": [real]],
+            knownTables: ["orders", "users", "genres"]
+        )
+        let entries = merged["orders"] ?? []
+        #expect(entries.count == 2)
+        #expect(entries.filter { $0.column == "user_id" } == [real])
+        #expect(entries.first { $0.column == "genre_id" }?.isVirtual == true)
+    }
+
+    @Test("A virtual foreign key on a table the catalog no longer has stays out")
+    func unknownTableStaysOut() {
+        let merged = ERDiagramViewModel.mergingVirtualForeignKeys(
+            ["dropped": [VirtualForeignKey(column: "user_id", referencedTable: "users", referencedColumn: "id")]],
+            into: [:],
+            knownTables: ["users"]
+        )
+        #expect(merged.isEmpty)
+    }
+
     @Test("A load started while another is still running waits for it instead of fitting the diagram again")
     func overlappingLoadFitsOnce() async throws {
         let opening = CatalogReadHold()

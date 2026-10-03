@@ -94,11 +94,20 @@ enum ForeignKeyRowFetcher {
         target targetScope: DatabaseScope,
         reference: JSONForeignKeyRef
     ) async -> [String: JSONForeignKeyRef] {
+        let virtualKeys = VirtualForeignKeyStore.shared.virtualForeignKeys(
+            for: TableScope(
+                connectionId: targetScope.connectionId,
+                database: targetScope.database,
+                schema: targetScope.schema,
+                table: reference.referencedTable
+            )
+        )
         if let cached = SchemaForeignKeyStore.shared.foreignKeysByColumn(
             for: targetScope,
             table: reference.referencedTable
         ) {
-            return cached.mapValues(JSONForeignKeyRef.init)
+            return VirtualForeignKeyMerge.merged(real: cached, virtual: virtualKeys)
+                .mapValues(JSONForeignKeyRef.init)
         }
 
         do {
@@ -106,13 +115,16 @@ enum ForeignKeyRowFetcher {
             let fetched = try await DatabaseManager.shared.withMetadataDriver(scope: targetScope) { driver in
                 try await driver.fetchForeignKeys(table: table)
             }
-            return Dictionary(
-                fetched.map { ($0.column, JSONForeignKeyRef($0)) },
+            let real = Dictionary(
+                fetched.map { ($0.column, $0) },
                 uniquingKeysWith: { first, _ in first }
             )
+            return VirtualForeignKeyMerge.merged(real: real, virtual: virtualKeys)
+                .mapValues(JSONForeignKeyRef.init)
         } catch {
             logger.error("Nested foreign key metadata fetch failed: \(error.localizedDescription)")
-            return [:]
+            return VirtualForeignKeyMerge.merged(real: [:], virtual: virtualKeys)
+                .mapValues(JSONForeignKeyRef.init)
         }
     }
 }

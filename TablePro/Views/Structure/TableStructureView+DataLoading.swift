@@ -82,7 +82,7 @@ extension TableStructureView {
                     Self.logger.error("Failed to load triggers: \(error.publicLogShape, privacy: .public)")
                     triggers = []
                 }
-            case .parts:
+            case .parts, .virtualForeignKeys:
                 return
             }
             tabData.markFetched(tab)

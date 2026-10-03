@@ -67,6 +67,18 @@ actor SQLSchemaProvider {
     private var fieldPathCache: [String: [PluginFieldPath]] = [:]
     private var fieldPathTasks: [String: Task<[PluginFieldPath], Never>] = [:]
 
+    /// Foreign keys per lowercased table name, real and virtual merged, snapshotted off the main
+    /// actor's stores. Completion reads this synchronously on every keystroke, so the snapshot is
+    /// taken when the scope loads and re-taken in the background once it ages past the lifetime,
+    /// never awaited on the completion path and never fetched from the database here: the real keys
+    /// come from `SchemaForeignKeyStore`'s prefetch, and a scope it has not fetched contributes
+    /// nothing rather than a query.
+    private var foreignKeysByTable: [String: [ForeignKeyInfo]] = [:]
+    private var foreignKeySnapshotTask: Task<Void, Never>?
+    private var foreignKeySnapshotTakenAt: Date?
+    private var foreignKeySnapshotGeneration = 0
+    private static let foreignKeySnapshotLifetime: TimeInterval = 10
+
     /// Another schema's tables, fetched when a statement names that schema and a dot. They are
     /// held apart from `tables`, which the scope's owner writes and every unqualified reader
     /// trusts, so completing `attendance.` cannot make `timesheet` an answer for a bare name.
@@ -127,6 +139,7 @@ actor SQLSchemaProvider {
     private func setLoadedTables(_ newTables: [TableInfo]) {
         tables = newTables
         startEagerColumnLoad()
+        startForeignKeySnapshotRefresh()
     }
 
     /// Get the current connection info
@@ -228,7 +241,9 @@ actor SQLSchemaProvider {
         self.cachedDriver = driver
         self.eagerLoadSchema = (driver as? SchemaSwitchable)?.currentSchema
         if let connection { self.connectionInfo = connection }
+        resetForeignKeySnapshot()
         startEagerColumnLoad()
+        startForeignKeySnapshotRefresh()
     }
 
     /// Empties the cache without refilling it. The refresh signal that reaches here also runs a
@@ -242,6 +257,7 @@ actor SQLSchemaProvider {
         columnTasks.removeAll()
         fieldPathCache.removeAll()
         fieldPathTasks.removeAll()
+        resetForeignKeySnapshot()
     }
 
     // MARK: - Eager Column Loading
@@ -330,6 +346,100 @@ actor SQLSchemaProvider {
 
     func waitForEagerColumnLoad() async {
         await eagerColumnTask?.value
+    }
+
+    // MARK: - Foreign Key Snapshot
+
+    /// Foreign keys of the named tables from the snapshot alone, keyed by lowercased table name.
+    ///
+    /// Answers what the snapshot holds right now and starts a background re-take when it has aged
+    /// out, so a virtual key configured after the scope loaded reaches the next completion request
+    /// without this one waiting on the main actor.
+    func foreignKeys(forTablesNamed names: [String]) -> [String: [ForeignKeyInfo]] {
+        refreshForeignKeySnapshotIfStale()
+        guard !foreignKeysByTable.isEmpty else { return [:] }
+
+        var result: [String: [ForeignKeyInfo]] = [:]
+        for name in names {
+            let key = name.lowercased()
+            guard result[key] == nil, let keys = foreignKeysByTable[key] else { continue }
+            result[key] = keys
+        }
+        return result
+    }
+
+    func waitForForeignKeySnapshot() async {
+        await foreignKeySnapshotTask?.value
+    }
+
+    private func refreshForeignKeySnapshotIfStale() {
+        if let takenAt = foreignKeySnapshotTakenAt,
+           Date().timeIntervalSince(takenAt) < Self.foreignKeySnapshotLifetime {
+            return
+        }
+        startForeignKeySnapshotRefresh()
+    }
+
+    private func startForeignKeySnapshotRefresh() {
+        guard foreignKeySnapshotTask == nil else { return }
+        guard let connectionId = connectionInfo?.id else { return }
+        let tableIdentities = tables.map { (name: $0.name, schema: $0.schema) }
+        guard !tableIdentities.isEmpty else { return }
+
+        let scope = DatabaseScope(
+            connectionId: connectionId,
+            database: scopeDatabase ?? "",
+            schema: eagerLoadSchema
+        )
+        let generation = foreignKeySnapshotGeneration
+        foreignKeySnapshotTask = Task {
+            let snapshot = await Self.collectForeignKeys(scope: scope, tables: tableIdentities)
+            self.installForeignKeySnapshot(snapshot, generation: generation)
+        }
+    }
+
+    private func installForeignKeySnapshot(_ snapshot: [String: [ForeignKeyInfo]], generation: Int) {
+        guard generation == foreignKeySnapshotGeneration else { return }
+        foreignKeySnapshotTask = nil
+        foreignKeysByTable = snapshot
+        foreignKeySnapshotTakenAt = Date()
+    }
+
+    private func resetForeignKeySnapshot() {
+        foreignKeySnapshotGeneration &+= 1
+        foreignKeySnapshotTask?.cancel()
+        foreignKeySnapshotTask = nil
+        foreignKeysByTable.removeAll()
+        foreignKeySnapshotTakenAt = nil
+    }
+
+    /// One pure read per table over the two main-actor stores: the schema-wide prefetch for real
+    /// keys, where nil means "not fetched" and contributes nothing without triggering a fetch, and
+    /// the virtual key store, merged under the same rule as everywhere else: a real constraint on a
+    /// column always covers a virtual one.
+    @MainActor
+    private static func collectForeignKeys(
+        scope: DatabaseScope,
+        tables: [(name: String, schema: String?)]
+    ) -> [String: [ForeignKeyInfo]] {
+        var snapshot: [String: [ForeignKeyInfo]] = [:]
+        for table in tables {
+            let real = SchemaForeignKeyStore.shared.foreignKeysByColumn(for: scope, table: table.name) ?? [:]
+            let virtualKeys = VirtualForeignKeyStore.shared.virtualForeignKeys(
+                for: TableScope(
+                    connectionId: scope.connectionId,
+                    database: scope.database,
+                    schema: table.schema ?? scope.schema,
+                    table: table.name
+                )
+            )
+            let merged = VirtualForeignKeyMerge.merged(real: real, virtual: virtualKeys)
+            guard !merged.isEmpty else { continue }
+            snapshot[table.name.lowercased()] = merged.values.sorted {
+                $0.column.lowercased() < $1.column.lowercased()
+            }
+        }
+        return snapshot
     }
 
     /// Find table name from alias

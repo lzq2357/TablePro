@@ -12,6 +12,7 @@ enum ERDiagramEdgeRenderer {
     }
 
     private static let strokeWidth: CGFloat = 1.5
+    private static let virtualDashPattern: [CGFloat] = [6, 4]
 
     static func drawEdges(
         edges: [EREdge],
@@ -114,8 +115,14 @@ enum ERDiagramEdgeRenderer {
                 path = curve
             }
 
+            if item.edge.isVirtual {
+                context.setLineDash(phase: 0, lengths: virtualDashPattern)
+            }
             context.addPath(path)
             context.strokePath()
+            if item.edge.isVirtual {
+                context.setLineDash(phase: 0, lengths: [])
+            }
             drawSourceMarker(cardinality: item.edge.cardinality, at: srcPort, toward: cp1, in: context)
             drawDestinationMarker(cardinality: item.edge.cardinality, at: dstPort, toward: cp2, in: context)
         }

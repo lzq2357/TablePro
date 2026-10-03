@@ -44,6 +44,7 @@ enum PreferenceKeys {
     static let foreignKeyLabelColumnPrefix = "com.TablePro.foreignKey.labelColumn."
     static let importColumnMappingPrefix = "com.TablePro.import.columnMapping."
     static let tableFoldersPrefix = "com.TablePro.tableFolders."
+    static let virtualForeignKeysPrefix = "com.TablePro.virtualForeignKeys."
 
     static func columnDisplayFormats(_ scope: TableScope) -> DefaultsKey<[String: ValueDisplayFormat]> {
         DefaultsKey(columnDisplayFormatsPrefix + scope.storageComponent)
@@ -63,5 +64,9 @@ enum PreferenceKeys {
 
     static func tableFolders(connectionId: UUID) -> DefaultsKey<Data> {
         DefaultsKey(tableFoldersPrefix + connectionId.uuidString)
+    }
+
+    static func virtualForeignKeys(_ scope: TableScope) -> DefaultsKey<[VirtualForeignKey]> {
+        DefaultsKey(virtualForeignKeysPrefix + scope.storageComponent)
     }
 }

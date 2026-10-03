@@ -39,6 +39,7 @@ struct EREdge: Identifiable, Sendable {
     let toTable: String
     let toColumn: String
     let cardinality: ERCardinality
+    var isVirtual: Bool = false
 }
 
 // MARK: - Graph
@@ -163,7 +164,8 @@ enum ERDiagramGraphBuilder {
                     cardinality: inferCardinality(
                         column: columnsByTable[tableName]?[fk.column],
                         uniqueColumns: uniqueSingleColumnsByTable[tableName] ?? []
-                    )
+                    ),
+                    isVirtual: fk.isVirtual
                 ))
             }
         }
@@ -230,12 +232,19 @@ enum ERDiagramGraphBuilder {
     ) -> [EREdge] {
         var edges: [EREdge] = []
         for tableName in allColumns.keys.sorted() {
+            let columns = allColumns[tableName] ?? []
+            let foreignKeys = allForeignKeys[tableName] ?? []
             guard let (parentA, parentB) = junctionParents(
                 tableName: tableName,
-                columns: allColumns[tableName] ?? [],
-                foreignKeys: allForeignKeys[tableName] ?? []
+                columns: columns,
+                foreignKeys: foreignKeys
             ) else { continue }
             guard nodeIndex[parentA] != nil, nodeIndex[parentB] != nil else { continue }
+
+            let primaryKeyColumns = Set(columns.filter(\.isPrimaryKey).map(\.name))
+            let hasVirtualBranch = foreignKeys.contains {
+                $0.isVirtual && primaryKeyColumns.contains($0.column)
+            }
 
             edges.append(EREdge(
                 id: stableId(for: "mn.\(tableName)"),
@@ -244,7 +253,8 @@ enum ERDiagramGraphBuilder {
                 fromColumn: "",
                 toTable: parentB,
                 toColumn: "",
-                cardinality: .manyToMany
+                cardinality: .manyToMany,
+                isVirtual: hasVirtualBranch
             ))
         }
         return edges
