@@ -84,6 +84,7 @@ public struct SQLContext: Sendable {
     public let isAfterComma: Bool
     public let expectsObjectName: Bool     // Cursor is in the table-operand slot of FROM/JOIN/INTO
     public let comparisonColumn: String?   // Set when the cursor is on the value side of a comparison
+    public let joinTarget: TableReference? // The table of the JOIN whose ON clause the cursor is in
 
     public init(
         clauseType: SQLClauseType,
@@ -98,7 +99,8 @@ public struct SQLContext: Sendable {
         currentFunction: String? = nil,
         isAfterComma: Bool = false,
         expectsObjectName: Bool = false,
-        comparisonColumn: String? = nil
+        comparisonColumn: String? = nil,
+        joinTarget: TableReference? = nil
     ) {
         self.clauseType = clauseType
         self.prefix = prefix
@@ -113,6 +115,7 @@ public struct SQLContext: Sendable {
         self.isAfterComma = isAfterComma
         self.expectsObjectName = expectsObjectName
         self.comparisonColumn = comparisonColumn
+        self.joinTarget = joinTarget
     }
 
     public func replacingTableReferences(_ references: [TableReference]) -> SQLContext {
@@ -129,7 +132,8 @@ public struct SQLContext: Sendable {
             currentFunction: currentFunction,
             isAfterComma: isAfterComma,
             expectsObjectName: expectsObjectName,
-            comparisonColumn: comparisonColumn
+            comparisonColumn: comparisonColumn,
+            joinTarget: joinTarget
         )
     }
 
@@ -249,6 +253,15 @@ public final class SQLContextAnalyzer {
         return patterns.map { compileRegex($0) }
     }()
 
+    /// The same shape as the JOIN pattern in `tableRefRegexes`, kept separate so the ON clause can
+    /// resolve which JOIN it belongs to: the one introduced by the JOIN keyword nearest the cursor.
+    private static let joinTargetRegex: NSRegularExpression = {
+        let segment = "[`\"']?\\w+[`\"']?"
+        let path = "(\(segment)(?:\\.\(segment))*)"
+        let alias = "(?:\\s+(?:AS\\s+)?[`\"']?(\\w+)[`\"']?)?"
+        return compileRegex("(?i)(?:LEFT|RIGHT|INNER|OUTER|CROSS|FULL)?\\s*(?:OUTER)?\\s*JOIN\\s+\(path)\(alias)")
+    }()
+
     /// Captures the comma-separated table list after a FROM keyword, up to the
     /// next clause keyword, opening parenthesis, or statement end. Handles
     /// old-style implicit joins (`FROM a, b, c`) that the single-table pattern
@@ -364,6 +377,10 @@ public final class SQLContextAnalyzer {
         let isCastTarget = endsWithCastOperator(nsBeforeCursor, before: prefixStart)
         let comparisonColumn = comparisonTarget(in: nsBeforeCursor, before: prefixStart)
 
+        let joinTarget = !isCastTarget && resolution.clause == .on
+            ? currentJoinTarget(in: clauseText, references: tableReferences)
+            : nil
+
         return SQLContext(
             clauseType: isCastTarget ? .castTarget : resolution.clause,
             prefix: prefix,
@@ -377,8 +394,33 @@ public final class SQLContextAnalyzer {
             currentFunction: currentFunction,
             isAfterComma: isAfterComma,
             expectsObjectName: resolution.expectsObjectName,
-            comparisonColumn: comparisonColumn
+            comparisonColumn: comparisonColumn,
+            joinTarget: joinTarget
         )
+    }
+
+    /// The table of the JOIN the cursor's ON clause belongs to, which is the JOIN keyword nearest
+    /// the cursor: a chained `a JOIN b ON … JOIN c ON |` is completing the join of `c`, so only
+    /// conditions pairing `c` with the tables before it apply.
+    private func currentJoinTarget(in textBeforePrefix: String, references: [TableReference]) -> TableReference? {
+        let windowSize = 5_000
+        let nsText = textBeforePrefix as NSString
+        let windowed = nsText.length > windowSize
+            ? nsText.substring(from: nsText.length - windowSize)
+            : textBeforePrefix
+        let cleaned = removeStringsAndComments(from: windowed)
+        let nsRange = NSRange(location: 0, length: (cleaned as NSString).length)
+
+        var lastMatch: NSTextCheckingResult?
+        Self.joinTargetRegex.enumerateMatches(in: cleaned, range: nsRange) { match, _, _ in
+            if let match { lastMatch = match }
+        }
+        guard let match = lastMatch, let parsed = tableReference(fromMatch: match, in: cleaned) else { return nil }
+
+        let resolved = references.first {
+            $0.identifier.caseInsensitiveCompare(parsed.identifier) == .orderedSame
+        }
+        return resolved ?? parsed
     }
 
     // MARK: - CTE Support
@@ -803,34 +845,7 @@ public final class SQLContextAnalyzer {
 
         for regex in Self.tableRefRegexes {
             regex.enumerateMatches(in: query, range: nsRange) { match, _, _ in
-                guard let match = match else { return }
-
-                let tableNSRange = match.range(at: 1)
-                guard tableNSRange.location != NSNotFound else { return }
-
-                let rawName = (query as NSString).substring(with: tableNSRange)
-                let segments = rawName.split(separator: ".").map {
-                    String($0).trimmingCharacters(in: Self.identifierQuoteChars)
-                }
-                guard let tableName = segments.last, !tableName.isEmpty else { return }
-                guard !Self.tableRefKeywords.contains(tableName.uppercased()) else { return }
-
-                let schema = segments.count >= 2 ? segments[segments.count - 2] : nil
-
-                var alias: String?
-                if match.numberOfRanges > 2 {
-                    let aliasNSRange = match.range(at: 2)
-                    if aliasNSRange.location != NSNotFound {
-                        let aliasCandidate = (query as NSString).substring(
-                            with: aliasNSRange
-                        )
-                        if !Self.tableRefKeywords.contains(aliasCandidate.uppercased()) {
-                            alias = aliasCandidate
-                        }
-                    }
-                }
-
-                let ref = TableReference(tableName: tableName, alias: alias, schema: schema)
+                guard let match, let ref = self.tableReference(fromMatch: match, in: query) else { return }
                 if seen.insert(ref).inserted {
                     references.append(ref)
                 }
@@ -838,6 +853,35 @@ public final class SQLContextAnalyzer {
         }
 
         return references
+    }
+
+    /// Resolve a table-reference regex match (path in group 1, alias in group 2) to a reference.
+    private func tableReference(fromMatch match: NSTextCheckingResult, in query: String) -> TableReference? {
+        let nsQuery = query as NSString
+        let tableNSRange = match.range(at: 1)
+        guard tableNSRange.location != NSNotFound else { return nil }
+
+        let rawName = nsQuery.substring(with: tableNSRange)
+        let segments = rawName.split(separator: ".").map {
+            String($0).trimmingCharacters(in: Self.identifierQuoteChars)
+        }
+        guard let tableName = segments.last, !tableName.isEmpty else { return nil }
+        guard !Self.tableRefKeywords.contains(tableName.uppercased()) else { return nil }
+
+        let schema = segments.count >= 2 ? segments[segments.count - 2] : nil
+
+        var alias: String?
+        if match.numberOfRanges > 2 {
+            let aliasNSRange = match.range(at: 2)
+            if aliasNSRange.location != NSNotFound {
+                let aliasCandidate = nsQuery.substring(with: aliasNSRange)
+                if !Self.tableRefKeywords.contains(aliasCandidate.uppercased()) {
+                    alias = aliasCandidate
+                }
+            }
+        }
+
+        return TableReference(tableName: tableName, alias: alias, schema: schema)
     }
 
     /// Attach derived-table columns to references and add any derived table or

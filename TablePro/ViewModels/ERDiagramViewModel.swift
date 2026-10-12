@@ -184,9 +184,19 @@ final class ERDiagramViewModel: ObservableObject {
                 return (cols, fks, idx)
             }
 
+            let virtualForeignKeys = VirtualForeignKeyStore.shared.virtualForeignKeys(
+                connectionId: connectionId,
+                database: databaseName,
+                schema: schemaName
+            )
+            let mergedForeignKeys = Self.mergingVirtualForeignKeys(
+                virtualForeignKeys,
+                into: foreignKeys,
+                knownTables: Set(columns.keys)
+            )
             fullGraph = ERDiagramGraphBuilder.build(
                 allColumns: columns,
-                allForeignKeys: foreignKeys,
+                allForeignKeys: mergedForeignKeys,
                 allIndexes: indexes
             )
 
@@ -208,6 +218,23 @@ final class ERDiagramViewModel: ObservableObject {
             Self.logger.error("Failed to load ER diagram: \(error.localizedDescription)")
             loadState = .failed(error.localizedDescription)
         }
+    }
+
+    nonisolated static func mergingVirtualForeignKeys(
+        _ virtualForeignKeys: [String: [VirtualForeignKey]],
+        into foreignKeys: [String: [ForeignKeyInfo]],
+        knownTables: Set<String>
+    ) -> [String: [ForeignKeyInfo]] {
+        var merged = foreignKeys
+        for (tableName, virtualKeys) in virtualForeignKeys where knownTables.contains(tableName) {
+            let realColumns = Set((merged[tableName] ?? []).map(\.column))
+            let additions = virtualKeys
+                .filter { !realColumns.contains($0.column) }
+                .map { $0.toForeignKeyInfo() }
+            guard !additions.isEmpty else { continue }
+            merged[tableName, default: []].append(contentsOf: additions)
+        }
+        return merged
     }
 
     private func waitForConnection() async {

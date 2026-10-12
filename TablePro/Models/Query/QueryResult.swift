@@ -399,6 +399,7 @@ struct ForeignKeyInfo: Identifiable, Hashable {
     let referencedSchema: String?
     let onDelete: String  // CASCADE, SET NULL, RESTRICT, NO ACTION
     let onUpdate: String
+    let isVirtual: Bool
 
     init(
         name: String,
@@ -408,7 +409,8 @@ struct ForeignKeyInfo: Identifiable, Hashable {
         referencedDatabase: String? = nil,
         referencedSchema: String? = nil,
         onDelete: String = "NO ACTION",
-        onUpdate: String = "NO ACTION"
+        onUpdate: String = "NO ACTION",
+        isVirtual: Bool = false
     ) {
         self.name = name
         self.column = column
@@ -418,6 +420,7 @@ struct ForeignKeyInfo: Identifiable, Hashable {
         self.referencedSchema = referencedSchema
         self.onDelete = onDelete
         self.onUpdate = onUpdate
+        self.isVirtual = isVirtual
     }
 }
 

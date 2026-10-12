@@ -23,6 +23,8 @@ enum StructureTabAvailability {
         switch tab {
         case .foreignKeys:
             return type.supportsForeignKeys
+        case .virtualForeignKeys:
+            return true
         case .parts:
             return type == .clickhouse
         case .triggers:

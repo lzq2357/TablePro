@@ -73,7 +73,7 @@ final class StructureRowProvider {
                 String(localized: "Expression"),
                 String(localized: "Columns")
             ]
-        case .ddl, .parts, .triggers:
+        case .ddl, .parts, .triggers, .virtualForeignKeys:
             return []
         }
     }
@@ -100,7 +100,7 @@ final class StructureRowProvider {
         switch tab {
         case .foreignKeys: ForeignKeyReferenceMenus.rowDependentColumns
         case .indexes: [Self.indexTypeColumn]
-        case .columns, .checkConstraints, .ddl, .parts, .triggers: []
+        case .columns, .checkConstraints, .ddl, .parts, .triggers, .virtualForeignKeys: []
         }
     }
 
@@ -154,7 +154,7 @@ final class StructureRowProvider {
                 result[index] = ColumnDefaultVocabulary.options(for: databaseType)
             }
             return result
-        case .checkConstraints, .ddl, .parts, .triggers:
+        case .checkConstraints, .ddl, .parts, .triggers, .virtualForeignKeys:
             return [:]
         }
     }
@@ -173,7 +173,7 @@ final class StructureRowProvider {
         case .columns:
             if let i = orderedColumnFields.firstIndex(of: .type) { return [i] }
             return []
-        case .indexes, .foreignKeys, .checkConstraints, .ddl, .parts, .triggers:
+        case .indexes, .foreignKeys, .checkConstraints, .ddl, .parts, .triggers, .virtualForeignKeys:
             return []
         }
     }
@@ -276,7 +276,7 @@ final class StructureRowProvider {
                 return nil
             }
             return Self.row(for: original)
-        case .ddl, .parts, .triggers:
+        case .ddl, .parts, .triggers, .virtualForeignKeys:
             return nil
         }
     }
@@ -310,7 +310,7 @@ final class StructureRowProvider {
             return changeManager.workingCheckConstraints.enumerated().map { index, constraint in
                 IndexedRow(sourceIndex: index, row: row(for: constraint))
             }
-        case .ddl, .parts, .triggers:
+        case .ddl, .parts, .triggers, .virtualForeignKeys:
             return []
         }
     }

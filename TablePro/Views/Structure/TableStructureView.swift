@@ -358,7 +358,7 @@ struct TableStructureView: View {
         case .foreignKeys: return foreignKeys.count
         case .triggers: return triggers.count
         case .checkConstraints: return checkConstraints.count
-        case .ddl, .parts: return nil
+        case .ddl, .parts, .virtualForeignKeys: return nil
         }
     }
 
@@ -414,6 +414,13 @@ struct TableStructureView: View {
                 isLoading: !tabData.hasData(.triggers),
                 canEdit: editGate.allowsTriggerEditing,
                 onOpenInEditor: openTriggerInEditor
+            )
+        case .virtualForeignKeys:
+            VirtualForeignKeySection(
+                connection: connection,
+                scope: scope,
+                tableName: tableName,
+                tableColumns: columns.map(\.name)
             )
         case .ddl:
             ddlView

@@ -12,6 +12,7 @@ enum StructureTab: String, CaseIterable, Hashable {
     case columns
     case indexes
     case foreignKeys
+    case virtualForeignKeys
     case checkConstraints
     case triggers
     case ddl
@@ -22,6 +23,7 @@ enum StructureTab: String, CaseIterable, Hashable {
         case .columns: String(localized: "Columns")
         case .indexes: String(localized: "Indexes")
         case .foreignKeys: String(localized: "Foreign Keys")
+        case .virtualForeignKeys: String(localized: "Virtual Keys")
         case .checkConstraints: String(localized: "Constraints")
         case .triggers: String(localized: "Triggers")
         case .ddl: "DDL"

@@ -432,7 +432,7 @@ final class StructureChangeManager: ObservableObject, ChangeManaging {
         case .checkConstraints:
             guard row < workingCheckConstraints.count else { return }
             key = .checkConstraint(workingCheckConstraints[row].id)
-        case .ddl, .parts, .triggers:
+        case .ddl, .parts, .triggers, .virtualForeignKeys:
             return
         }
         guard pendingChanges[key]?.isDelete == true else { return }
@@ -926,7 +926,7 @@ final class StructureChangeManager: ObservableObject, ChangeManaging {
             return rowState(at: row, using: Self.foreignKeyOperations)
         case .checkConstraints:
             return rowState(at: row, using: Self.checkConstraintOperations)
-        case .ddl, .parts, .triggers:
+        case .ddl, .parts, .triggers, .virtualForeignKeys:
             return (false, false)
         }
     }

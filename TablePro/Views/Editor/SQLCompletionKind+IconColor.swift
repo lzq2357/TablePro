@@ -19,6 +19,7 @@ extension SQLCompletionKind {
         case .alias: return .systemGray
         case .operator: return .systemIndigo
         case .favorite: return .systemYellow
+        case .relation: return .systemCyan
         }
     }
 }

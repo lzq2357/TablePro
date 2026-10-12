@@ -35,6 +35,27 @@ struct ForeignKeyPickerView: View {
     private static let searchDebounce = Duration.milliseconds(200)
     private static let listHeight: CGFloat = 220
 
+    /// Seed the search field with the cell's current value so the picker opens on the row it already
+    /// holds. The field focuses on appear and selects its text, so the first keystroke replaces it.
+    init(
+        scope: DatabaseScope,
+        databaseType: DatabaseType,
+        fkInfo: ForeignKeyInfo,
+        currentValue: String?,
+        isNullable: Bool,
+        onCommit: @escaping (String?) -> Void,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.scope = scope
+        self.databaseType = databaseType
+        self.fkInfo = fkInfo
+        self.currentValue = currentValue
+        self.isNullable = isNullable
+        self.onCommit = onCommit
+        self.onDismiss = onDismiss
+        _searchText = State(initialValue: currentValue ?? "")
+    }
+
     var body: some View {
         Group {
             if isChoosingLabels {
